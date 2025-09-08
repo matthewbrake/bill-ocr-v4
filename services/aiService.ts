@@ -1,8 +1,8 @@
 import { GoogleGenAI } from "@google/genai";
 import type { BillData, AiSettings, OllamaModel } from "../types";
 import { prompt as geminiPrompt, billSchema } from '../prompts/prompt_v2';
+// Note: The hybrid prompt is no longer directly used by callOllama, but kept for reference
 import { prompt as ollamaHybridPrompt } from '../prompts/prompt_ocr_hybrid';
-import Tesseract from 'tesseract.js';
 
 // --- Common Utilities ---
 
@@ -153,12 +153,29 @@ const postProcessData = (parsedData: any): BillDataSansId => {
 const runOcr = async (imageB64: string, addLog: Function): Promise<string> => {
     addLog('INFO', 'Starting OCR with Tesseract.js...');
     try {
-        const { data: { text } } = await Tesseract.recognize(imageB64, 'eng');
-        addLog('INFO', 'OCR completed successfully.', { text });
+        // FIX: Dynamically import Tesseract.js to prevent potential startup crashes.
+        // The module is loaded on-demand, which also improves initial load time.
+        const Tesseract = (await import('tesseract.js')).default;
+        
+        const { data: { text } } = await Tesseract.recognize(
+            imageB64, 
+            'eng',
+            { 
+                logger: m => {
+                    // Log progress updates to the debug console
+                    if (m.progress > 0 && m.progress < 1) {
+                         addLog('DEBUG', `Tesseract.js: ${m.status}`, { progress: `${(m.progress * 100).toFixed(0)}%` });
+                    }
+                }
+            }
+        );
+
+        addLog('INFO', 'OCR completed successfully.', { textLength: text.length });
         return text;
     } catch (error) {
         addLog('ERROR', 'OCR failed with Tesseract.js.', error);
-        return '';
+        // FIX: Throw an error that can be caught by the UI to show a helpful message.
+        throw new Error(`OCR processing failed. The OCR engine could not be loaded or failed to process the image. Details: ${error instanceof Error ? error.message : String(error)}`);
     }
 };
 
@@ -206,85 +223,173 @@ const callGemini = async (imageB64: string, addLog: Function): Promise<AnalysisR
 
 // --- Ollama Provider ---
 
+// Utility to generate a chart image for self-correction
+const generateVerificationImage = (chartData: BillData['usageCharts'][0]): Promise<string> => {
+    return new Promise((resolve) => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 800; // Define a consistent size for the image
+        canvas.height = 400;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+            resolve('');
+            return;
+        }
+
+        // Simple white background
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Render chart title
+        ctx.fillStyle = '#000000';
+        ctx.font = '20px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(chartData.title, canvas.width / 2, 30);
+
+        // Simple axis
+        const xOffset = 50;
+        const yOffset = 50;
+        const chartWidth = canvas.width - xOffset * 2;
+        const chartHeight = canvas.height - yOffset * 2;
+        const maxVal = Math.max(1, ...chartData.data.flatMap(d => d.usage.map(u => u.value))); // Ensure maxVal is at least 1
+
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(xOffset, yOffset);
+        ctx.lineTo(xOffset, yOffset + chartHeight);
+        ctx.lineTo(xOffset + chartWidth, yOffset + chartHeight);
+        ctx.stroke();
+
+        // Draw bars based on the provided data
+        if (chartData.data.length > 0 && chartData.data[0].usage.length > 0) {
+            const barWidth = chartWidth / (chartData.data.length * chartData.data[0].usage.length) - 5;
+            chartData.data.forEach((monthData, monthIndex) => {
+                monthData.usage.forEach((usageData, yearIndex) => {
+                    const barHeight = (usageData.value / maxVal) * chartHeight;
+                    const xPos = xOffset + (monthIndex * monthData.usage.length + yearIndex) * (barWidth + 5);
+                    const yPos = yOffset + chartHeight - barHeight;
+
+                    ctx.fillStyle = ['#38bdf8', '#a78bfa', '#fbbf24', '#f87171'][yearIndex % 4]; // Use a color
+                    ctx.fillRect(xPos, yPos, barWidth, barHeight);
+
+                    // Draw the value on top of the bar for explicit reference
+                    ctx.fillStyle = '#000000';
+                    ctx.font = '12px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(String(usageData.value), xPos + barWidth / 2, yPos - 5);
+                });
+            });
+        }
+        
+        resolve(canvas.toDataURL('image/jpeg'));
+    });
+};
+
 const callOllama = async (imageB64: string, url: string, model: string, addLog: Function): Promise<AnalysisResult> => {
     if (!url || !model) {
         addLog('ERROR', 'Ollama URL or model is not configured.');
         throw new Error("Ollama URL or model is not configured. Please add it in the settings.");
     }
-    addLog('INFO', `Starting bill analysis with Ollama model: ${model}`);
+    addLog('INFO', `Starting a two-pass analysis with Ollama model: ${model}`);
 
     const ocrText = await runOcr(imageB64, addLog);
 
     let endpoint: string;
     try {
-        endpoint = getValidatedOllamaUrl(url, "/api/chat"); // Ollama API uses /api/chat
+        endpoint = getValidatedOllamaUrl(url, "/api/chat");
     } catch (error) {
         addLog('ERROR', 'Invalid Ollama URL in settings', { url, error });
         if (error instanceof Error) throw error;
         throw new Error("An unknown error occurred during Ollama URL validation.");
     }
 
+    // --- First Pass: Initial Extraction ---
+    addLog('INFO', 'First pass: extracting initial data from the bill.');
+    const firstPassPrompt = `You are an expert OCR system. Extract information from the provided image and raw OCR text, and return a single, raw JSON object that conforms to the schema.
+    
+Raw OCR Text:
+${ocrText}
+`;
+
+    let firstPassResponse;
     try {
-        const requestBody = {
+        const firstPassBody = {
             model: model,
-            format: "json", // Use the 'format' parameter for Ollama
+            format: "json",
             stream: false,
-            options: {
-                // temperature: 0, // Optional: lower temp for more deterministic output
-            },
-            messages: [
-                {
-                    role: "system",
-                    content: ollamaHybridPrompt(ocrText),
-                },
-                {
-                    role: "user",
-                    content: "Analyze this utility bill image.",
-                    images: [imageB64.substring(imageB64.indexOf(",") + 1)], // Send base64 data directly
-                }
-            ],
+            messages: [{ role: "system", content: firstPassPrompt }, { role: "user", content: "Analyze this bill image.", images: [imageB64.substring(imageB64.indexOf(",") + 1)] }],
         };
-        addLog('DEBUG', `Ollama Request to ${endpoint}`, requestBody);
-
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestBody),
-        });
-
-        if (!response.ok) {
-            const errorBody = await response.text();
-            addLog('ERROR', `Ollama API Error (${response.status})`, errorBody);
-            console.error("Ollama API Error Response:", errorBody);
-            throw new Error(`Ollama API returned an error: ${response.status} ${response.statusText}. Check your server URL and ensure the model is running.`);
-        }
-
+        addLog('DEBUG', `Ollama First Pass Request to ${endpoint}`, firstPassBody);
+        const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(firstPassBody) });
+        if (!response.ok) throw new Error(`API Error (${response.status}): ${response.statusText}`);
         const responseData = await response.json();
-        addLog('DEBUG', 'Ollama Raw Response:', responseData);
+        firstPassResponse = JSON.parse(responseData.message.content);
+        addLog('DEBUG', 'First Pass Response:', firstPassResponse);
+    } catch (error) {
+        addLog('ERROR', 'First pass failed:', error);
+        throw new Error("Initial analysis failed. The model may not have followed instructions. Check the debug log for details.");
+    }
+
+    // --- Generate Verification Image from First Pass Data ---
+    if (!firstPassResponse.usageCharts || firstPassResponse.usageCharts.length === 0) {
+        addLog('INFO', 'No usage charts found in the first pass. Skipping self-correction and returning initial data.');
+        const parsedData = postProcessData(sanitizeAiResponse(firstPassResponse));
+        return { parsedData, rawResponse: JSON.stringify(firstPassResponse) };
+    }
+
+    const verificationChartImage = await generateVerificationImage(firstPassResponse.usageCharts[0]);
+    addLog('INFO', 'Generated verification image from first pass data.');
+
+    // --- Second Pass: Guided Correction ---
+    addLog('INFO', 'Second pass: self-correcting using the verification image.');
+    const secondPassPrompt = `You are an expert OCR system. I have two images:
+1.  The original utility bill.
+2.  A verification image that visualizes the chart data you previously extracted.
+
+Your task is to compare the chart in the original image with the data points shown in the verification image. If you find any discrepancies, correct the chart data and provide a new, corrected JSON object. If the data is correct, return the original JSON.
+
+Original Bill Image vs. Verification Chart Image: Analyze both to ensure the data is accurate.
+
+Original Data to be Verified:
+${JSON.stringify(firstPassResponse, null, 2)}
+`;
+
+    try {
+        const secondPassBody = {
+            model: model,
+            format: "json",
+            stream: false,
+            messages: [{
+                role: "system", content: secondPassPrompt
+            }, {
+                role: "user", content: "Compare and correct the data.", images: [imageB64.substring(imageB64.indexOf(",") + 1), verificationChartImage.substring(verificationChartImage.indexOf(",") + 1)]
+            }],
+        };
+        addLog('DEBUG', `Ollama Second Pass Request to ${endpoint}`, secondPassBody);
+
+        const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(secondPassBody) });
+        if (!response.ok) throw new Error(`API Error (${response.status}): ${response.statusText}`);
+        const responseData = await response.json();
+        const finalJson = JSON.parse(responseData.message.content);
         
-        // The JSON content is in the 'content' property of the message
-        const jsonText = responseData.message.content;
-        
-        const parsedJson = JSON.parse(jsonText);
-        const sanitizedJson = sanitizeAiResponse(parsedJson);
-        addLog('INFO', 'Successfully parsed & sanitized Ollama response.', sanitizedJson);
+        addLog('INFO', 'Second pass successful. Final data:', finalJson);
+        const sanitizedJson = sanitizeAiResponse(finalJson);
         const parsedData = postProcessData(sanitizedJson);
-        return { parsedData, rawResponse: jsonText };
+        return { parsedData, rawResponse: JSON.stringify(finalJson) };
 
     } catch (error) {
-        addLog('ERROR', 'Ollama Request Error:', error);
-        console.error("Ollama Request Error:", error);
+        addLog('ERROR', 'Second pass failed:', error);
         if (error instanceof TypeError) {
              throw new Error("Could not connect to the Ollama server. This is often a network or CORS issue. Please ensure: 1) The server is running. 2) The URL is correct. 3) CORS is enabled on the Ollama server (e.g., set OLLAMA_ORIGINS='*').");
         }
         if (error instanceof SyntaxError) {
-            // This error is caught when JSON.parse fails
-            throw new Error("Ollama returned invalid JSON. The model may not have followed instructions. Check the debug log.");
+            throw new Error("Ollama returned invalid JSON during self-correction. The model may not have followed instructions. Check the debug log.");
         }
         if (error instanceof Error) throw error;
-        throw new Error("An unknown error occurred while communicating with Ollama.");
+        throw new Error("An unknown error occurred during the self-correction phase.");
     }
 };
+
 
 export const fetchOllamaModels = async (url: string, addLog: Function): Promise<OllamaModel[]> => {
     if (!url) {
@@ -332,7 +437,7 @@ export const analyzeBill = async (imageB64: string, settings: AiSettings, addLog
         case 'gemini':
             return callGemini(imageB64, addLog);
         case 'ollama':
-            // Ollama now uses the hybrid workflow
+            // Ollama now uses the two-pass iterative workflow
             return callOllama(imageB64, settings.ollamaUrl, settings.ollamaModel, addLog);
         default:
             const exhaustiveCheck: never = settings.provider;
