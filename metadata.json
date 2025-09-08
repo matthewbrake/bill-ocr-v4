@@ -1,0 +1,7 @@
+{
+  "name": "AI Bill Analyzer-v2-ocr-sdk",
+  "description": "An advanced application that uses AI to scan, analyze, and verify utility bills. It supports both Google Gemini and local Ollama models, featuring enhanced debugging, connection testing, dynamic model discovery, and interactive data verification to ensure accuracy.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

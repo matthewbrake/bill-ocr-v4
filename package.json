@@ -1,0 +1,25 @@
+{
+  "name": "ai-bill-analyzer",
+  "version": "1.0.0",
+  "description": "An intuitive application that uses AI to scan and analyze utility bills.",
+  "private": true,
+  "scripts": {
+    "build": "node esbuild.config.js",
+    "start": "serve -s dist"
+  },
+  "dependencies": {
+    "@google/genai": "^1.16.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "recharts": "^3.1.2",
+    "tesseract.js": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "dotenv": "^16.4.5",
+    "esbuild": "^0.23.0",
+    "serve": "^14.2.3",
+    "typescript": "^5.5.3"
+  }
+}
