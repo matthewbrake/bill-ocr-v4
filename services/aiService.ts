@@ -1,8 +1,132 @@
 import { GoogleGenAI } from "@google/genai";
-import type { BillData, AiSettings, OllamaModel } from "../types";
+import type { BillData, AiSettings, OllamaModel, UsageChartData, LogEntry } from "../types";
 import { prompt as geminiPrompt, billSchema } from '../prompts/prompt_v2';
-// Note: The hybrid prompt is no longer directly used by callOllama, but kept for reference
-import { prompt as ollamaHybridPrompt } from '../prompts/prompt_ocr_hybrid';
+
+// FIX: Define a specific type for the logging function to ensure type safety.
+type AddLogFn = (level: LogEntry['level'], message: string, payload?: any) => void;
+
+// --- Chart Analysis Framework (New for Ollama) ---
+
+/**
+ * Crops the bottom 60% of the image, where charts are typically located.
+ * @param imageB64 The base64 encoded image string.
+ * @returns A promise that resolves with the base64 encoded string of the cropped image.
+ */
+// FIX: Correctly type the addLog parameter.
+const cropToChartArea = async (imageB64: string, addLog: AddLogFn): Promise<string> => {
+    const img = new Image();
+    await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = imageB64;
+    });
+
+    const cropY = img.height * 0.4;
+    const cropHeight = img.height * 0.6;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = img.width;
+    canvas.height = cropHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error("Could not get canvas context for cropping.");
+    
+    ctx.drawImage(img, 0, cropY, img.width, cropHeight, 0, 0, img.width, cropHeight);
+    addLog('DEBUG', 'Cropped image to chart area.', { originalHeight: img.height, newHeight: cropHeight });
+    return canvas.toDataURL('image/png');
+};
+
+/**
+ * Performs OCR on the chart area to get text elements with their coordinates.
+ * This helps the LLM to spatially understand the chart layout.
+ * @param chartImage The Tesseract.ImageLike object for the chart area.
+ * @param addLog The logging function.
+ * @returns A string containing structured text and coordinate data.
+ */
+// FIX: Correctly type the addLog parameter.
+const getOcrTextWithCoordsFromChart = async (chartImageB64: string, addLog: AddLogFn): Promise<string> => {
+    addLog('DEBUG', 'Performing targeted OCR on chart area to extract text with coordinates...');
+    const Tesseract = (await import('tesseract.js')).default;
+    const { data: { words } } = await Tesseract.recognize(chartImageB64, 'eng', {
+        logger: m => {
+            if (m.status === 'recognizing text') {
+                 addLog('DEBUG', `Chart OCR Progress: ${(m.progress * 100).toFixed(0)}%`);
+            }
+        }
+    });
+    
+    const structuredText = words.map(w => `"${w.text.trim()}" at (x: ${w.bbox.x0}, y: ${w.bbox.y0})`).join('; ');
+    addLog('INFO', 'Targeted chart OCR complete.', { wordCount: words.length });
+    return structuredText;
+};
+
+/**
+ * This is the core function for the new chart analysis workflow.
+ * It combines targeted OCR with a specialized LLM call to extract chart data.
+ * @param imageB64 The full bill image.
+ * @param ollamaUrl The URL for the Ollama server.
+ * @param ollamaModel The model to use.
+ * @param addLog The logging function.
+ * @returns A promise that resolves to an array of extracted chart data.
+ */
+// FIX: Correctly type the addLog parameter.
+const analyzeChartData = async (
+    imageB64: string,
+    ollamaUrl: string,
+    ollamaModel: string,
+    addLog: AddLogFn,
+): Promise<UsageChartData[]> => {
+    addLog('INFO', 'Starting chart analysis with data fusion framework.');
+
+    // Pass 1: Crop image to focus on the chart area.
+    const chartImageB64 = await cropToChartArea(imageB64, addLog);
+
+    // Pass 2: Perform targeted OCR on the cropped chart area.
+    const ocrData = await getOcrTextWithCoordsFromChart(chartImageB64, addLog);
+
+    // Pass 3: Use an LLM to fuse the visual chart image with the OCR coordinate data.
+    addLog('INFO', 'Fusing OCR data with visual analysis using Ollama.');
+    const fusionPrompt = `You are a data analysis expert. You are given an image of a bar chart area and structured OCR data from that image. Your task is to interpret the chart and return ONLY a raw JSON object containing an array of all charts found.
+
+The OCR data provides text and its (x,y) coordinates. Use these to identify the months on the x-axis, the scale on the y-axis, and the years in the legend.
+Then, visually analyze the image to estimate the height of each bar. Correlate the bar's x-position with the month labels from the OCR data. Correlate the bar's color (if discernible) with the legend.
+
+Your output must be a JSON object with a single key "usageCharts", which is an array. Each element in the array should follow this structure: { "title": "...", "unit": "...", "data": [{ "month": "...", "usage": [{ "year": "...", "value": ... }] }] }
+
+Here is the OCR data from the chart area:
+${ocrData}
+`;
+    
+    const endpoint = new URL("/api/chat", ollamaUrl).toString();
+    const body = {
+        model: ollamaModel,
+        format: "json",
+        stream: false,
+        messages: [{
+            role: "system", content: fusionPrompt
+        }, {
+            role: "user", content: "Analyze this chart image and its corresponding OCR data.", images: [chartImageB64.substring(chartImageB64.indexOf(",") + 1)]
+        }],
+    };
+    addLog('DEBUG', 'Ollama Chart Fusion Request:', { url: endpoint, model: ollamaModel, prompt: fusionPrompt });
+
+    const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (!response.ok) {
+        const errorBody = await response.text();
+        addLog('ERROR', `Chart Fusion API Error (${response.status})`, { errorBody });
+        throw new Error(`Chart Fusion analysis failed with status ${response.status}.`);
+    }
+    const responseData = await response.json();
+    const fusedJson = JSON.parse(responseData.message.content);
+    
+    if (!fusedJson.usageCharts || !Array.isArray(fusedJson.usageCharts)) {
+        addLog('ERROR', 'Chart fusion result is missing or has an invalid "usageCharts" array.', fusedJson);
+        throw new Error("Chart analysis failed: The AI's response did not contain the expected 'usageCharts' data structure.");
+    }
+    
+    addLog('INFO', 'Chart data fused successfully.', fusedJson.usageCharts);
+    return fusedJson.usageCharts;
+};
+
 
 // --- Common Utilities ---
 
@@ -150,7 +274,8 @@ const postProcessData = (parsedData: any): BillDataSansId => {
 
 // --- Tesseract OCR Function ---
 
-const runOcr = async (imageB64: string, addLog: Function): Promise<string> => {
+// FIX: Correctly type the addLog parameter.
+const runOcr = async (imageB64: string, addLog: AddLogFn): Promise<string> => {
     addLog('INFO', 'Starting OCR with Tesseract.js...');
     try {
         // FIX: Dynamically import Tesseract.js to prevent potential startup crashes.
@@ -181,7 +306,8 @@ const runOcr = async (imageB64: string, addLog: Function): Promise<string> => {
 
 // --- Gemini Provider ---
 
-const callGemini = async (imageB64: string, addLog: Function): Promise<AnalysisResult> => {
+// FIX: Correctly type the addLog parameter.
+const callGemini = async (imageB64: string, addLog: AddLogFn): Promise<AnalysisResult> => {
     addLog('INFO', 'Starting bill analysis with Gemini...');
     
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -223,76 +349,13 @@ const callGemini = async (imageB64: string, addLog: Function): Promise<AnalysisR
 
 // --- Ollama Provider ---
 
-// Utility to generate a chart image for self-correction
-const generateVerificationImage = (chartData: BillData['usageCharts'][0]): Promise<string> => {
-    return new Promise((resolve) => {
-        const canvas = document.createElement('canvas');
-        canvas.width = 800; // Define a consistent size for the image
-        canvas.height = 400;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-            resolve('');
-            return;
-        }
-
-        // Simple white background
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        // Render chart title
-        ctx.fillStyle = '#000000';
-        ctx.font = '20px Arial';
-        ctx.textAlign = 'center';
-        ctx.fillText(chartData.title, canvas.width / 2, 30);
-
-        // Simple axis
-        const xOffset = 50;
-        const yOffset = 50;
-        const chartWidth = canvas.width - xOffset * 2;
-        const chartHeight = canvas.height - yOffset * 2;
-        const maxVal = Math.max(1, ...chartData.data.flatMap(d => d.usage.map(u => u.value))); // Ensure maxVal is at least 1
-
-        ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(xOffset, yOffset);
-        ctx.lineTo(xOffset, yOffset + chartHeight);
-        ctx.lineTo(xOffset + chartWidth, yOffset + chartHeight);
-        ctx.stroke();
-
-        // Draw bars based on the provided data
-        if (chartData.data.length > 0 && chartData.data[0].usage.length > 0) {
-            const barWidth = chartWidth / (chartData.data.length * chartData.data[0].usage.length) - 5;
-            chartData.data.forEach((monthData, monthIndex) => {
-                monthData.usage.forEach((usageData, yearIndex) => {
-                    const barHeight = (usageData.value / maxVal) * chartHeight;
-                    const xPos = xOffset + (monthIndex * monthData.usage.length + yearIndex) * (barWidth + 5);
-                    const yPos = yOffset + chartHeight - barHeight;
-
-                    ctx.fillStyle = ['#38bdf8', '#a78bfa', '#fbbf24', '#f87171'][yearIndex % 4]; // Use a color
-                    ctx.fillRect(xPos, yPos, barWidth, barHeight);
-
-                    // Draw the value on top of the bar for explicit reference
-                    ctx.fillStyle = '#000000';
-                    ctx.font = '12px Arial';
-                    ctx.textAlign = 'center';
-                    ctx.fillText(String(usageData.value), xPos + barWidth / 2, yPos - 5);
-                });
-            });
-        }
-        
-        resolve(canvas.toDataURL('image/jpeg'));
-    });
-};
-
-const callOllama = async (imageB64: string, url: string, model: string, addLog: Function): Promise<AnalysisResult> => {
+// FIX: Correctly type the addLog parameter.
+const callOllama = async (imageB64: string, url: string, model: string, addLog: AddLogFn): Promise<AnalysisResult> => {
     if (!url || !model) {
         addLog('ERROR', 'Ollama URL or model is not configured.');
         throw new Error("Ollama URL or model is not configured. Please add it in the settings.");
     }
-    addLog('INFO', `Starting a two-pass analysis with Ollama model: ${model}`);
-
-    const ocrText = await runOcr(imageB64, addLog);
+    addLog('INFO', `Starting analysis with Ollama model: ${model} using Multi-Pass Fusion Framework.`);
 
     let endpoint: string;
     try {
@@ -303,95 +366,77 @@ const callOllama = async (imageB64: string, url: string, model: string, addLog: 
         throw new Error("An unknown error occurred during Ollama URL validation.");
     }
 
-    // --- First Pass: Initial Extraction ---
-    addLog('INFO', 'First pass: extracting initial data from the bill.');
-    const firstPassPrompt = `You are an expert OCR system. Extract information from the provided image and raw OCR text, and return a single, raw JSON object that conforms to the schema.
-    
-Raw OCR Text:
+    try {
+        // Pass 1: Full-document OCR to get all text.
+        const ocrText = await runOcr(imageB64, addLog);
+
+        // Pass 2: Specialized chart analysis using a multi-step fusion process.
+        const analyzedCharts = await analyzeChartData(imageB64, url, model, addLog);
+
+        // Pass 3: Final data fusion and structuring.
+        addLog('INFO', 'Final pass: Fusing all data into the final schema.');
+        const finalPrompt = `You are a data structuring expert. You are given raw OCR text from a utility bill, a pre-analyzed JSON object for the bill's usage charts, and the original image. Your job is to combine this information to produce a single, final JSON object that conforms to the provided schema.
+
+- Prioritize the raw OCR text for extracting account details, dates, and line items.
+- Use the pre-analyzed chart JSON directly for the 'usageCharts' field. Do not try to re-analyze the charts from the image.
+- Refer to the image only if necessary to resolve ambiguities in the OCR text for non-chart elements.
+- Your entire response MUST be a single, raw JSON object. Do not include any other text or markdown.
+
+**Raw OCR Text:**
+---
 ${ocrText}
+---
+
+**Pre-analyzed Usage Chart JSON:**
+---
+${JSON.stringify(analyzedCharts, null, 2)}
+---
 `;
 
-    let firstPassResponse;
-    try {
-        const firstPassBody = {
-            model: model,
-            format: "json",
-            stream: false,
-            messages: [{ role: "system", content: firstPassPrompt }, { role: "user", content: "Analyze this bill image.", images: [imageB64.substring(imageB64.indexOf(",") + 1)] }],
-        };
-        addLog('DEBUG', `Ollama First Pass Request to ${endpoint}`, firstPassBody);
-        const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(firstPassBody) });
-        if (!response.ok) throw new Error(`API Error (${response.status}): ${response.statusText}`);
-        const responseData = await response.json();
-        firstPassResponse = JSON.parse(responseData.message.content);
-        addLog('DEBUG', 'First Pass Response:', firstPassResponse);
-    } catch (error) {
-        addLog('ERROR', 'First pass failed:', error);
-        throw new Error("Initial analysis failed. The model may not have followed instructions. Check the debug log for details.");
-    }
-
-    // --- Generate Verification Image from First Pass Data ---
-    if (!firstPassResponse.usageCharts || firstPassResponse.usageCharts.length === 0) {
-        addLog('INFO', 'No usage charts found in the first pass. Skipping self-correction and returning initial data.');
-        const parsedData = postProcessData(sanitizeAiResponse(firstPassResponse));
-        return { parsedData, rawResponse: JSON.stringify(firstPassResponse) };
-    }
-
-    const verificationChartImage = await generateVerificationImage(firstPassResponse.usageCharts[0]);
-    addLog('INFO', 'Generated verification image from first pass data.');
-
-    // --- Second Pass: Guided Correction ---
-    addLog('INFO', 'Second pass: self-correcting using the verification image.');
-    const secondPassPrompt = `You are an expert OCR system. I have two images:
-1.  The original utility bill.
-2.  A verification image that visualizes the chart data you previously extracted.
-
-Your task is to compare the chart in the original image with the data points shown in the verification image. If you find any discrepancies, correct the chart data and provide a new, corrected JSON object. If the data is correct, return the original JSON.
-
-Original Bill Image vs. Verification Chart Image: Analyze both to ensure the data is accurate.
-
-Original Data to be Verified:
-${JSON.stringify(firstPassResponse, null, 2)}
-`;
-
-    try {
-        const secondPassBody = {
+        const finalBody = {
             model: model,
             format: "json",
             stream: false,
             messages: [{
-                role: "system", content: secondPassPrompt
+                role: "system", content: finalPrompt
             }, {
-                role: "user", content: "Compare and correct the data.", images: [imageB64.substring(imageB64.indexOf(",") + 1), verificationChartImage.substring(verificationChartImage.indexOf(",") + 1)]
+                role: "user", content: "Analyze the bill using the provided OCR text and chart data.", images: [imageB64.substring(imageB64.indexOf(",") + 1)]
             }],
         };
-        addLog('DEBUG', `Ollama Second Pass Request to ${endpoint}`, secondPassBody);
+        addLog('DEBUG', `Ollama Final Fusion Request to ${endpoint}`, { model: finalBody.model, prompt: finalPrompt });
 
-        const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(secondPassBody) });
+        const response = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(finalBody) });
         if (!response.ok) throw new Error(`API Error (${response.status}): ${response.statusText}`);
-        const responseData = await response.json();
-        const finalJson = JSON.parse(responseData.message.content);
         
-        addLog('INFO', 'Second pass successful. Final data:', finalJson);
+        const responseData = await response.json();
+        const finalContent = responseData.message.content;
+        addLog('DEBUG', 'Ollama Final Fusion Raw Response:', finalContent);
+        const finalJson = JSON.parse(finalContent);
+        
+        // The AI was given the chart data, but we can override it just in case it hallucinated.
+        finalJson.usageCharts = analyzedCharts;
+
+        addLog('INFO', 'Final fusion successful. Sanitizing and processing data.', finalJson);
         const sanitizedJson = sanitizeAiResponse(finalJson);
         const parsedData = postProcessData(sanitizedJson);
         return { parsedData, rawResponse: JSON.stringify(finalJson) };
 
     } catch (error) {
-        addLog('ERROR', 'Second pass failed:', error);
+        addLog('ERROR', 'Ollama multi-pass fusion failed:', error);
         if (error instanceof TypeError) {
              throw new Error("Could not connect to the Ollama server. This is often a network or CORS issue. Please ensure: 1) The server is running. 2) The URL is correct. 3) CORS is enabled on the Ollama server (e.g., set OLLAMA_ORIGINS='*').");
         }
         if (error instanceof SyntaxError) {
-            throw new Error("Ollama returned invalid JSON during self-correction. The model may not have followed instructions. Check the debug log.");
+            throw new Error("Ollama returned invalid JSON. The model may not have followed instructions. Check the debug log.");
         }
         if (error instanceof Error) throw error;
-        throw new Error("An unknown error occurred during the self-correction phase.");
+        throw new Error("An unknown error occurred during the Ollama analysis workflow.");
     }
 };
 
 
-export const fetchOllamaModels = async (url: string, addLog: Function): Promise<OllamaModel[]> => {
+// FIX: Correctly type the addLog parameter.
+export const fetchOllamaModels = async (url: string, addLog: AddLogFn): Promise<OllamaModel[]> => {
     if (!url) {
         throw new Error("Ollama URL is not provided.");
     }
@@ -432,12 +477,13 @@ export const fetchOllamaModels = async (url: string, addLog: Function): Promise<
 
 // --- Main Service Function ---
 
-export const analyzeBill = async (imageB64: string, settings: AiSettings, addLog: Function): Promise<AnalysisResult> => {
+// FIX: Correctly type the addLog parameter.
+export const analyzeBill = async (imageB64: string, settings: AiSettings, addLog: AddLogFn): Promise<AnalysisResult> => {
     switch (settings.provider) {
         case 'gemini':
             return callGemini(imageB64, addLog);
         case 'ollama':
-            // Ollama now uses the two-pass iterative workflow
+            // Ollama now uses the new Multi-Pass Fusion Framework.
             return callOllama(imageB64, settings.ollamaUrl, settings.ollamaModel, addLog);
         default:
             const exhaustiveCheck: never = settings.provider;

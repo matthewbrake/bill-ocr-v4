@@ -7,6 +7,7 @@ An advanced, intuitive application that uses the power of multimodal AI to scan,
 ## Core Features
 
 -   **Dual AI Provider Support**: Seamlessly switch between **Google Gemini** (gemini-2.5-flash) for powerful cloud-based analysis and any local **Ollama** model for offline, privacy-focused processing.
+-   **Advanced Chart Analysis (for Ollama)**: Utilizes a Multi-Pass Data Fusion framework. It performs targeted OCR on chart regions, fuses this data with visual analysis via an LLM, and then combines it with a full-document text extraction to achieve high accuracy on complex bar charts.
 -   **Intelligent OCR & Data Extraction**: Extracts key information including account details, line items, total charges, and complex usage data from bar charts.
 -   **Interactive Data Verification**: If the AI is uncertain about a piece of data (e.g., a blurry number), it flags the field and asks the user a direct question for verification.
 -   **Editable Data Tables**: All extracted data, especially from usage charts, is presented in editable tables, allowing you to correct any AI inaccuracies.
@@ -157,6 +158,16 @@ docker-compose down
 ---
 
 ## Technical Notes
+
+### Ollama's Multi-Pass Data Fusion Framework
+
+Extracting data from charts is a known challenge for general-purpose multimodal models. To solve this, this application uses a specialized workflow for local Ollama models that significantly improves accuracy:
+
+1.  **Targeted Chart Analysis**: The application first identifies the likely chart area on the bill. It runs a targeted OCR pass on just this area to extract all text elements (months, units, legend) along with their precise coordinates.
+2.  **Visual-Textual Fusion**: A specialized prompt is sent to the Ollama model, providing it with both the cropped chart image and the coordinate-aware text from step 1. The model's task is no longer to "read" the chart from scratch, but to fuse the visual information (the bars) with the provided text labels, resulting in a structured JSON object of the chart's data.
+3.  **Final Assembly**: In the final pass, a different prompt is sent to the model. It receives the full-page OCR text and the structured chart JSON from the previous step. Its job is to assemble the final, complete bill data, using the reliable pre-analyzed chart data and focusing its efforts on the remaining text-based fields.
+
+This "divide and conquer" approach plays to the strengths of each technology: OCR for precise text extraction and the LLM for structured data assembly and reasoning.
 
 ### Why Formspree instead of SMTP?
 
