@@ -6,47 +6,133 @@ type AddLogFn = (level: LogEntry['level'], message: string, payload?: any) => vo
 interface OcrWord {
     text: string;
     bbox: { x0: number; y0: number; x1: number; y1: number; };
+    confidence: number;
 }
 
-// These bounding box coordinates are fine-tuned for the PECO bill example (825x1066px).
-// They define specific regions for targeted OCR to improve accuracy.
-const CHART_REGIONS = {
-    yAxis: { top: 500, left: 75, width: 35, height: 200 },
-    months: { top: 705, left: 160, width: 520, height: 20 },
-    barChartArea: { top: 500, left: 160, width: 520, height: 200 }
+interface ChartCandidate {
+    id: number;
+    months: OcrWord[];
+    yAxis: OcrWord[];
+    legend: OcrWord[];
+    title: OcrWord[];
+    unit?: OcrWord;
+    bounds: { x0: number, y0: number, x1: number, y1: number };
+}
+
+// --- Text Classification and Filtering ---
+
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const isMonth = (word: OcrWord) => {
+    const cleanText = word.text.toLowerCase().replace(/[^a-z]/g, '');
+    return MONTHS.some(m => m.startsWith(cleanText));
+};
+const isNumber = (word: OcrWord) => !isNaN(parseFloat(word.text.replace(/,/g, '')));
+const isYear = (word: OcrWord) => /^\d{4}$/.test(word.text);
+const isUnit = (word: OcrWord) => ['kwh', 'm³', 'therms'].includes(word.text.toLowerCase());
+
+
+// --- Geometric Analysis Utilities ---
+
+const getCenter = (bbox: OcrWord['bbox']) => ({
+    x: (bbox.x0 + bbox.x1) / 2,
+    y: (bbox.y0 + bbox.y1) / 2
+});
+
+const isHorizontallyAligned = (word1: OcrWord, word2: OcrWord, tolerance = 10) => {
+    const y1 = getCenter(word1.bbox).y;
+    const y2 = getCenter(word2.bbox).y;
+    return Math.abs(y1 - y2) < tolerance;
+};
+
+const isVerticallyAligned = (word1: OcrWord, word2: OcrWord, tolerance = 15) => {
+    const x1 = getCenter(word1.bbox).x;
+    const x2 = getCenter(word2.bbox).x;
+    return Math.abs(x1 - x2) < tolerance;
+};
+
+const distance = (p1: { x: number, y: number }, p2: { x: number, y: number }) => {
+    return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
 };
 
 /**
- * Checks if a pixel from a canvas's ImageData is dark (i.e., not background).
- * @param data The Uint8ClampedArray from getImageData.
- * @param index The starting index of the pixel's RGBA values.
- * @returns True if the pixel is not white or near-white.
+ * Dynamically finds and clusters chart-related text elements using geometric analysis.
  */
+const findChartCandidates = (words: OcrWord[], addLog: AddLogFn): ChartCandidate[] => {
+    addLog('DEBUG', 'Starting dynamic chart candidate discovery...');
+    const potentialMonths = words.filter(isMonth).sort((a, b) => a.bbox.x0 - b.bbox.x0);
+    const potentialYAxis = words.filter(isNumber).sort((a, b) => b.bbox.y0 - a.bbox.y0);
+    const potentialLegends = words.filter(isYear);
+    const potentialUnits = words.filter(isUnit);
+
+    const candidates: ChartCandidate[] = [];
+    let chartId = 0;
+
+    // Find groups of horizontally aligned months, which are strong indicators of a chart's x-axis.
+    for (let i = 0; i < potentialMonths.length; i++) {
+        const monthGroup = [potentialMonths[i]];
+        for (let j = i + 1; j < potentialMonths.length; j++) {
+            if (isHorizontallyAligned(potentialMonths[i], potentialMonths[j])) {
+                monthGroup.push(potentialMonths[j]);
+            }
+        }
+
+        if (monthGroup.length > 3 && !candidates.some(c => c.months.includes(monthGroup[0]))) {
+            const sortedMonths = monthGroup.sort((a, b) => a.bbox.x0 - b.bbox.x0);
+            const avgY = sortedMonths.reduce((sum, m) => sum + getCenter(m.bbox).y, 0) / sortedMonths.length;
+            const minX = sortedMonths[0].bbox.x0;
+            const maxX = sortedMonths[sortedMonths.length - 1].bbox.x1;
+
+            // Find associated Y-axis labels (vertically aligned, to the left of the months)
+            const associatedYAxis = potentialYAxis.filter(y =>
+                isVerticallyAligned(y, sortedMonths[0], 30) && y.bbox.x1 < minX
+            );
+
+            if (associatedYAxis.length > 1) {
+                const bounds = {
+                    x0: associatedYAxis[0].bbox.x0,
+                    y0: associatedYAxis[associatedYAxis.length-1].bbox.y0,
+                    x1: maxX,
+                    y1: avgY,
+                };
+                
+                // Find legend and unit within a reasonable distance of the chart area
+                const chartCenter = { x: (bounds.x0 + bounds.x1) / 2, y: (bounds.y0 + bounds.y1) / 2 };
+                const associatedLegend = potentialLegends.filter(l => distance(getCenter(l.bbox), chartCenter) < 300);
+                const associatedUnit = potentialUnits.find(u => distance(getCenter(u.bbox), {x: bounds.x0, y: chartCenter.y}) < 100);
+
+                candidates.push({
+                    id: chartId++,
+                    months: sortedMonths,
+                    yAxis: associatedYAxis,
+                    legend: associatedLegend.sort((a,b) => a.bbox.x0 - b.bbox.x0),
+                    title: [], // Title detection can be added here
+                    unit: associatedUnit,
+                    bounds,
+                });
+            }
+        }
+    }
+    
+    addLog('INFO', `Found ${candidates.length} potential chart(s) on the page.`, candidates);
+    return candidates;
+};
+
+// --- Pixel Analysis for Bar Detection ---
+
 const isDarkPixel = (data: Uint8ClampedArray, index: number): boolean => {
     const r = data[index];
     const g = data[index + 1];
     const b = data[index + 2];
-    // Simple threshold check for non-white pixels.
-    return r < 240 && g < 240 && b < 240;
+    return r < 240 && g < 240 && b < 240; // Simple threshold for non-white
 };
 
-/**
- * Programmatically detects the height of bars in the chart area.
- * @param imageB64 The base64 encoded string of the full bill image.
- * @param months An array of month words with their bounding boxes.
- * @param yAxisValues An array of Y-axis value words with their bounding boxes.
- * @param addLog The logging function.
- * @returns An array of numbers representing the calculated value of each bar.
- */
-const detectBars = async (
+const detectBarsForChart = async (
     imageB64: string,
-    months: OcrWord[],
-    yAxisValues: OcrWord[],
+    chart: ChartCandidate,
     addLog: AddLogFn
-): Promise<number[]> => {
-    addLog('INFO', 'Starting programmatic bar detection by analyzing image pixels.');
+): Promise<UsageChartData> => {
+    addLog('INFO', `Starting programmatic bar detection for Chart ${chart.id}.`);
     
-    // --- 1. Set up canvas and image ---
     const img = new Image();
     await new Promise(resolve => { img.onload = resolve; img.src = imageB64; });
 
@@ -54,125 +140,125 @@ const detectBars = async (
     canvas.width = img.width;
     canvas.height = img.height;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) throw new Error("Could not get canvas context for bar detection.");
+    if (!ctx) throw new Error("Could not get canvas context.");
     ctx.drawImage(img, 0, 0);
 
-    // --- 2. Calculate the Y-Axis scale (value per pixel) ---
-    const yValues = yAxisValues.map(v => ({
+    // Calculate Y-Axis scale
+    const yValues = chart.yAxis.map(v => ({
         value: parseInt(v.text.replace(/,/g, ''), 10),
-        y: v.bbox.y0
-    })).filter(v => !isNaN(v.value));
-
-    if (yValues.length < 2) {
-        addLog('ERROR', 'Could not determine chart scale. Need at least two Y-axis values.');
-        throw new Error("Chart analysis failed: Insufficient Y-axis data from OCR.");
-    }
-
-    const sortedY = [...yValues].sort((a, b) => a.value - b.value);
-    const yMin = sortedY[0];
-    const yMax = sortedY[sortedY.length - 1];
-
+        y: getCenter(v.bbox).y
+    })).filter(v => !isNaN(v.value)).sort((a, b) => a.value - b.value);
+    
+    if (yValues.length < 2) throw new Error(`Chart ${chart.id} has insufficient Y-axis labels.`);
+    
+    const yMin = yValues[0];
+    const yMax = yValues[yValues.length - 1];
     const pixelRange = Math.abs(yMin.y - yMax.y);
     const valueRange = yMax.value - yMin.value;
     const valuePerPixel = valueRange / pixelRange;
-    const baselineY = yMin.y; // The Y-coordinate for the '0' value line.
+    const zeroLineY = yMin.value === 0 ? yMin.y : yMax.y + ((yMax.value / valueRange) * pixelRange);
+    
+    addLog('DEBUG', `Chart ${chart.id} Y-axis scale calculated`, { yMin, yMax, valuePerPixel, zeroLineY });
+    
+    const chartArea = {
+        x0: chart.months[0].bbox.x0,
+        y0: yMax.y,
+        x1: chart.months[chart.months.length - 1].bbox.x1,
+        y1: zeroLineY
+    };
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
 
-    addLog('DEBUG', 'Calculated Y-axis scale', { yMin, yMax, valuePerPixel });
+    const years = chart.legend.map(l => l.text);
+    const numYears = Math.max(1, years.length);
 
-    // --- 3. Detect bar heights ---
-    const barValues: number[] = [];
-    const { top, left, width, height } = CHART_REGIONS.barChartArea;
-    const imageData = ctx.getImageData(left, top, width, height);
+    const usageData: UsageChartData['data'] = [];
 
-    for (const month of months) {
-        // Center of the month's text is our scanline
-        const scanX = Math.round(month.bbox.x0 + (month.bbox.x1 - month.bbox.x0) / 2);
-        // Adjust to be relative to the cropped barChartArea
-        const relativeScanX = scanX - left;
+    for (const month of chart.months) {
+        const monthCenter = getCenter(month.bbox);
+        const barWidthGuess = (month.bbox.x1 - month.bbox.x0) / numYears;
+        const monthUsage: { year: string, value: number }[] = [];
 
-        let barTopY = -1;
-        // Scan vertically upwards from the baseline
-        for (let y = height - 1; y >= 0; y--) {
-            const pixelIndex = (y * width + relativeScanX) * 4;
-            if (isDarkPixel(imageData.data, pixelIndex)) {
-                barTopY = y + top; // Convert back to full image coordinate
-                break;
+        for (let i = 0; i < numYears; i++) {
+            const scanX = Math.round(month.bbox.x0 + (i * barWidthGuess) + (barWidthGuess / 2));
+            let barTopY = -1;
+
+            for (let y = Math.floor(zeroLineY); y > chartArea.y0; y--) {
+                const pixelIndex = (y * canvas.width + scanX) * 4;
+                if (isDarkPixel(imageData.data, pixelIndex)) {
+                    barTopY = y;
+                    break;
+                }
+            }
+
+            const year = years[i] || `Year ${i+1}`;
+            if (barTopY !== -1) {
+                const pixelHeight = zeroLineY - barTopY;
+                const value = Math.round(pixelHeight * valuePerPixel);
+                monthUsage.push({ year, value });
+                addLog('DEBUG', `Detected bar for ${month.text} ${year}`, { scanX, barTopY, value });
+            } else {
+                monthUsage.push({ year, value: 0 });
             }
         }
-
-        if (barTopY !== -1) {
-            const pixelHeight = baselineY - barTopY;
-            const calculatedValue = Math.round(pixelHeight * valuePerPixel);
-            barValues.push(calculatedValue);
-            addLog('DEBUG', `Detected bar for month: ${month.text}`, { scanX, barTopY, pixelHeight, calculatedValue });
-        } else {
-            barValues.push(0); // Assume 0 if no bar is found
-            addLog('DEBUG', `No bar found for month: ${month.text}. Assuming value 0.`);
-        }
+        usageData.push({ month: month.text, usage: monthUsage });
     }
 
-    addLog('INFO', 'Programmatic bar detection complete.');
-    return barValues;
+    return {
+        title: chart.title.map(t => t.text).join(' ') || `Usage Chart ${chart.id}`,
+        unit: chart.unit?.text || 'Units',
+        data: usageData,
+    };
 };
 
+// --- Main Exported Function ---
 
-/**
- * The main chart processing function. It orchestrates targeted OCR and programmatic
- * bar detection to extract chart data without LLM visual interpretation.
- * @param imageB64 The base64 encoded string of the full bill image.
- * @param addLog The logging function.
- * @returns A promise resolving to a structured UsageChartData object.
- */
-export const processChart = async (imageB64: string, addLog: AddLogFn): Promise<UsageChartData> => {
-    addLog('INFO', 'Starting programmatic chart processing...');
+export const processChart = async (imageB64: string, addLog: AddLogFn): Promise<UsageChartData[]> => {
+    addLog('INFO', 'Starting advanced programmatic chart processing v2.1...');
     
-    // FIX: A Tesseract worker is needed to perform OCR on a specific region of an image.
-    const worker = await Tesseract.createWorker('eng');
+    const worker = await Tesseract.createWorker('eng', 1, {
+        logger: m => addLog('DEBUG', `Chart OCR Progress: ${m.status} (${(m.progress * 100).toFixed(0)}%)`),
+    });
+    
     try {
-        // --- Pass 1: Targeted OCR on Chart Regions ---
-        addLog('DEBUG', 'Performing targeted OCR on Y-Axis & Months...');
-        // FIX: The `rectangle` option is part of the second argument in `worker.recognize`.
-        const ocrPromises = [
-            worker.recognize(imageB64, { rectangle: CHART_REGIONS.yAxis }),
-            worker.recognize(imageB64, { rectangle: CHART_REGIONS.months })
-        ];
-        const [yAxisResult, monthsResult] = await Promise.all(ocrPromises);
+        // Pass 1: Full-page OCR to get all text geometry
+        // FIX: The top-level `words` property on the Tesseract Page object is not present in all
+        // versions or type definitions. Accessing words by flattening the `lines` array is more robust.
+        const { data } = await worker.recognize(imageB64);
+        const words = (data.lines || []).flatMap(l => l.words);
+        const allWords: OcrWord[] = words.map(w => ({
+            text: w.text,
+            bbox: w.bbox,
+            confidence: w.confidence
+        }));
+        addLog('DEBUG', `Chart processor OCR complete. Found ${allWords.length} words.`);
 
-        // FIX: The 'words' property may not be directly on 'data' depending on the type definitions.
-        // Accessing words via flat-mapping the 'lines' array is more robust.
-        const yAxisValues = yAxisResult.data.lines.flatMap(l => l.words).map(w => ({ text: w.text.trim(), bbox: w.bbox }));
-        const months = monthsResult.data.lines.flatMap(l => l.words).map(w => ({ text: w.text.trim(), bbox: w.bbox }));
-        
-        addLog('DEBUG', 'Targeted OCR complete.', { yAxisValues: yAxisValues.map(v=>v.text), months: months.map(m=>m.text) });
-        
-        if (months.length === 0 || yAxisValues.length < 2) {
-            addLog('ERROR', 'Initial OCR failed to find critical chart elements (months or y-axis).');
-            throw new Error("Chart analysis failed: Could not read the chart's axes.");
+        // Pass 2: Find chart candidates
+        const candidates = findChartCandidates(allWords, addLog);
+        if (candidates.length === 0) {
+            addLog('INFO', 'No chart candidates found on the page.');
+            return [];
+        }
+
+        // Pass 3: Process each candidate
+        const processedCharts: UsageChartData[] = [];
+        for (const candidate of candidates) {
+            try {
+                const chartData = await detectBarsForChart(imageB64, candidate, addLog);
+                processedCharts.push(chartData);
+            } catch (e) {
+                addLog('ERROR', `Failed to process chart candidate ${candidate.id}`, e);
+            }
         }
         
-        // --- Pass 2: Programmatic Bar Detection ---
-        const barValues = await detectBars(imageB64, months, yAxisValues, addLog);
+        addLog('INFO', `Programmatic chart analysis successful. Extracted ${processedCharts.length} chart(s).`, processedCharts);
+        return processedCharts;
 
-        // --- Pass 3: Data Fusion ---
-        // The statement date from the main bill is needed to figure out the years for the months.
-        // The final assembly LLM will handle this. We will just assign a placeholder year for now.
-        // This makes the structure correct for the LLM to populate.
-        const chartData: UsageChartData = {
-            title: '13-Month Usage (Total kWh)', // This is specific to the PECO bill. A more advanced solution might OCR this too.
-            unit: 'kWh',
-            data: months.map((month, index) => ({
-                month: month.text,
-                usage: [{
-                    year: 'YYYY', // Placeholder year
-                    value: barValues[index] || 0
-                }]
-            }))
-        };
-        
-        addLog('INFO', 'Programmatic chart analysis successful.', chartData);
-        return chartData;
-    } finally {
-        // FIX: Always terminate the worker to release resources.
+    } catch(error) {
+        addLog('ERROR', 'The chart processing engine failed.', error);
+        // Return empty array on failure so the rest of the app doesn't crash.
+        return [];
+    }
+    finally {
         await worker.terminate();
     }
 };

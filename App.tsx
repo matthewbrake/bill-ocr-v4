@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAiSettings } from './hooks/useAiSettings';
 import { analyzeBill } from './services/aiService';
@@ -14,6 +13,7 @@ import { Settings } from './components/Settings';
 import { HistoryList } from './components/HistoryList';
 import { DebugLog } from './components/DebugLog';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { InfoModal } from './components/InfoModal';
 
 const App: React.FC = () => {
     const [settings, saveSettings] = useAiSettings();
@@ -31,6 +31,7 @@ const App: React.FC = () => {
         }
     });
     const [showSettings, setShowSettings] = useState(false);
+    const [showInfoModal, setShowInfoModal] = useState(false);
     const [isDarkMode, setIsDarkMode] = useState(document.documentElement.classList.contains('dark'));
     const [logs, setLogs] = useState<LogEntry[]>([]);
     const [showDebugLog, setShowDebugLog] = useState(false);
@@ -152,6 +153,7 @@ const App: React.FC = () => {
             <Header
                 onSettingsClick={() => setShowSettings(true)}
                 onDebugClick={() => setShowDebugLog(prev => !prev)}
+                onInfoClick={() => setShowInfoModal(true)}
                 isDarkMode={isDarkMode}
                 toggleDarkMode={toggleDarkMode}
             />
@@ -161,6 +163,10 @@ const App: React.FC = () => {
                 settings={settings} 
                 onSave={saveSettings}
                 addLog={addLog}
+            />
+            <InfoModal 
+                isOpen={showInfoModal}
+                onClose={() => setShowInfoModal(false)}
             />
 
             <div className="flex-grow flex">

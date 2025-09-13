@@ -171,7 +171,8 @@ const runOcr = async (imageB64: string, addLog: AddLogFn): Promise<string> => {
             }
         );
 
-        addLog('INFO', 'Full-page OCR completed successfully.', { textLength: text.length });
+        addLog('INFO', 'Full-page OCR completed successfully.');
+        addLog('DEBUG', 'Full OCR Text:', { ocrText: text });
         return text;
     } catch (error) {
         addLog('ERROR', 'OCR failed with Tesseract.js.', error);
@@ -250,12 +251,12 @@ const callOllama = async (imageB64: string, url: string, model: string, addLog: 
 
         // Pass 3: Final data fusion and structuring with the AI.
         addLog('INFO', 'Final pass: Fusing all data into the final schema using AI.');
-        const finalPrompt = `You are a data structuring expert. You are given raw OCR text from a utility bill and a perfectly pre-analyzed JSON object for the bill's usage chart. Your job is to combine this information to produce a single, final JSON object that conforms to the provided schema.
+        const finalPrompt = `You are a data structuring expert. You are given raw OCR text from a utility bill and a perfectly pre-analyzed JSON object for the bill's usage chart(s). Your job is to combine this information to produce a single, final JSON object that conforms to the provided schema.
 
 - Prioritize the raw OCR text for extracting account details, dates, and line items.
 - The OCR text may contain errors. Use your reasoning to correct them (e.g., misread numbers, garbled text).
 - Use the pre-analyzed chart JSON directly for the 'usageCharts' field. The values in this JSON are programmatically generated and 100% accurate. Do not try to re-analyze the chart from the image or text.
-- Based on the statement date in the OCR text, you MUST update the placeholder 'YYYY' year for each month in the provided chart data to the correct year. The chart shows the last 13 months.
+- Based on the statement date found in the OCR text, you MUST update any placeholder years (like 'YYYY') in the provided chart data to the correct year(s). The chart data typically shows usage for the past 12-13 months, so reason about the correct calendar years for the given months. For dual-bar charts, the legend in the text/image will tell you which years are represented.
 - Your entire response MUST be a single, raw JSON object. Do not include any other text or markdown.
 
 **Raw OCR Text:**
@@ -265,7 +266,7 @@ ${ocrText}
 
 **Pre-analyzed Usage Chart JSON (Use this directly):**
 ---
-${JSON.stringify([analyzedCharts], null, 2)}
+${JSON.stringify(analyzedCharts, null, 2)}
 ---
 `;
 
@@ -290,11 +291,14 @@ ${JSON.stringify([analyzedCharts], null, 2)}
         const finalJson = JSON.parse(finalContent);
         
         // The AI was told to use the chart data, but we override it here to be 100% certain it's correct.
-        finalJson.usageCharts = finalJson.usageCharts && finalJson.usageCharts.length > 0 ? finalJson.usageCharts : [analyzedCharts];
+        finalJson.usageCharts = finalJson.usageCharts && finalJson.usageCharts.length > 0 ? finalJson.usageCharts : analyzedCharts;
 
-        addLog('INFO', 'Final fusion successful. Sanitizing and processing data.', finalJson);
+        addLog('INFO', 'Final fusion successful. Sanitizing and processing data.');
+        addLog('DEBUG', 'Data before sanitization:', finalJson);
         const sanitizedJson = sanitizeAiResponse(finalJson);
+        addLog('DEBUG', 'Data after sanitization:', sanitizedJson);
         const parsedData = postProcessData(sanitizedJson);
+        addLog('DEBUG', 'Final processed data:', parsedData);
         return { parsedData, rawResponse: JSON.stringify(finalJson) };
 
     } catch (error) {
