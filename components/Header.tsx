@@ -4,16 +4,22 @@ interface HeaderProps {
     onSettingsClick: () => void;
     onDebugClick: () => void;
     onInfoClick: () => void;
+    onToggleSidebar: () => void;
     isDarkMode: boolean;
     toggleDarkMode: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ onSettingsClick, onDebugClick, onInfoClick, isDarkMode, toggleDarkMode }) => {
+export const Header: React.FC<HeaderProps> = ({ onSettingsClick, onDebugClick, onInfoClick, onToggleSidebar, isDarkMode, toggleDarkMode }) => {
     return (
         <header className="bg-white/70 dark:bg-slate-900/70 backdrop-blur-lg sticky top-0 z-40 w-full border-b border-slate-200 dark:border-slate-800 no-print">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
                 <div className="flex items-center justify-between h-16">
                     <div className="flex items-center space-x-2">
+                         <button onClick={onToggleSidebar} title="Toggle History Sidebar" className="p-2 -ml-2 rounded-full hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 md:hidden">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6 text-slate-500 dark:text-slate-400">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+                            </svg>
+                        </button>
                         <svg className="w-8 h-8 text-sky-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
                             <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
                         </svg>

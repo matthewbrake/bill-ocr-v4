@@ -184,6 +184,7 @@ const runOcr = async (imageB64: string, addLog: AddLogFn): Promise<string> => {
 
 const callGemini = async (imageB64: string, addLog: AddLogFn): Promise<AnalysisResult> => {
     addLog('INFO', 'Starting bill analysis with Gemini...');
+    addLog('PROGRESS', 'Initializing Gemini API...');
     
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     
@@ -204,16 +205,20 @@ const callGemini = async (imageB64: string, addLog: AddLogFn): Promise<AnalysisR
             },
         };
         addLog('DEBUG', 'Gemini Request Payload:', requestPayload);
+        addLog('PROGRESS', 'Sending image to Gemini model...');
 
         const response = await ai.models.generateContent(requestPayload);
         
+        addLog('PROGRESS', 'Received response from Gemini.');
         const jsonText = response.text.trim();
         addLog('DEBUG', 'Gemini Raw Response:', jsonText);
-
+        
+        addLog('PROGRESS', 'Parsing and structuring data...');
         const parsedJson = JSON.parse(jsonText);
         const sanitizedJson = sanitizeAiResponse(parsedJson);
         addLog('INFO', 'Successfully parsed & sanitized Gemini response.', sanitizedJson);
         const parsedData = postProcessData(sanitizedJson);
+        addLog('PROGRESS', 'Analysis complete.');
         return { parsedData, rawResponse: jsonText };
     } catch (error) {
         addLog('ERROR', 'Gemini API Error:', error);
@@ -230,6 +235,7 @@ const callOllama = async (imageB64: string, url: string, model: string, addLog: 
         throw new Error("Ollama URL or model is not configured. Please add it in the settings.");
     }
     addLog('INFO', `Starting analysis with Ollama model: ${model} using Multi-Pass Fusion Framework.`);
+    addLog('PROGRESS', 'Initializing Ollama multi-pass analysis...');
 
     let endpoint: string;
     try {
@@ -242,15 +248,18 @@ const callOllama = async (imageB64: string, url: string, model: string, addLog: 
 
     try {
         // Pass 1: Full-document OCR to get all text.
+        addLog('PROGRESS', 'Pass 1: Performing full-page OCR...');
         const ocrTextPromise = runOcr(imageB64, addLog);
 
         // Pass 2: Specialized chart analysis using a programmatic, pixel-based process.
+        addLog('PROGRESS', 'Pass 2: Analyzing charts with pixel detection...');
         const chartDataPromise = processChart(imageB64, addLog);
         
         const [ocrText, analyzedCharts] = await Promise.all([ocrTextPromise, chartDataPromise]);
 
         // Pass 3: Final data fusion and structuring with the AI.
         addLog('INFO', 'Final pass: Fusing all data into the final schema using AI.');
+        addLog('PROGRESS', 'Pass 3: Fusing data with Ollama model...');
         const finalPrompt = `You are a data structuring expert. You are given raw OCR text from a utility bill and a perfectly pre-analyzed JSON object for the bill's usage chart(s). Your job is to combine this information to produce a single, final JSON object that conforms to the provided schema.
 
 - Prioritize the raw OCR text for extracting account details, dates, and line items.
@@ -292,13 +301,15 @@ ${JSON.stringify(analyzedCharts, null, 2)}
         
         // The AI was told to use the chart data, but we override it here to be 100% certain it's correct.
         finalJson.usageCharts = finalJson.usageCharts && finalJson.usageCharts.length > 0 ? finalJson.usageCharts : analyzedCharts;
-
+        
+        addLog('PROGRESS', 'Finalizing and sanitizing data...');
         addLog('INFO', 'Final fusion successful. Sanitizing and processing data.');
         addLog('DEBUG', 'Data before sanitization:', finalJson);
         const sanitizedJson = sanitizeAiResponse(finalJson);
         addLog('DEBUG', 'Data after sanitization:', sanitizedJson);
         const parsedData = postProcessData(sanitizedJson);
         addLog('DEBUG', 'Final processed data:', parsedData);
+        addLog('PROGRESS', 'Analysis complete.');
         return { parsedData, rawResponse: JSON.stringify(finalJson) };
 
     } catch (error) {
@@ -356,6 +367,7 @@ export const fetchOllamaModels = async (url: string, addLog: AddLogFn): Promise<
 // --- Main Service Function ---
 
 export const analyzeBill = async (imageB64: string, settings: AiSettings, addLog: AddLogFn): Promise<AnalysisResult> => {
+    addLog('PROGRESS', `Preparing to analyze with ${settings.provider}...`);
     switch (settings.provider) {
         case 'gemini':
             return callGemini(imageB64, addLog);

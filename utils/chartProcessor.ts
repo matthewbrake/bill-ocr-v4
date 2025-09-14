@@ -221,10 +221,11 @@ export const processChart = async (imageB64: string, addLog: AddLogFn): Promise<
     
     try {
         // Pass 1: Full-page OCR to get all text geometry
-        // FIX: The top-level `words` property on the Tesseract Page object is not present in all
-        // versions or type definitions. Accessing words by flattening the `lines` array is more robust.
         const { data } = await worker.recognize(imageB64);
-        const words = (data.lines || []).flatMap(l => l.words);
+        // FIX: Property 'lines' does not exist on type 'Page'. This was causing a type error.
+        // Traversing the full block -> paragraph -> line hierarchy is more robust across Tesseract.js versions
+        // and handles cases where top-level properties might be missing from the type definitions.
+        const words = (data.blocks || []).flatMap(b => (b.paragraphs || []).flatMap(p => (p.lines || []).flatMap(l => l.words || [])));
         const allWords: OcrWord[] = words.map(w => ({
             text: w.text,
             bbox: w.bbox,

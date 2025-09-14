@@ -35,6 +35,7 @@ const App: React.FC = () => {
     const [isDarkMode, setIsDarkMode] = useState(document.documentElement.classList.contains('dark'));
     const [logs, setLogs] = useState<LogEntry[]>([]);
     const [showDebugLog, setShowDebugLog] = useState(false);
+    const [isSidebarOpen, setIsSidebarOpen] = useState(true);
 
     const addLog = useCallback((level: LogEntry['level'], message: string, payload?: any) => {
         const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
@@ -89,6 +90,13 @@ const App: React.FC = () => {
         if (!capturedImage) {
             setError("No image to analyze.");
             addLog('ERROR', "Analysis triggered with no image.");
+            return;
+        }
+
+        if (settings.provider === 'gemini' && !process.env.API_KEY) {
+            const msg = "Gemini API key is not configured. Please set the API_KEY environment variable.";
+            setError(msg);
+            addLog('ERROR', msg);
             return;
         }
 
@@ -156,6 +164,7 @@ const App: React.FC = () => {
                 onInfoClick={() => setShowInfoModal(true)}
                 isDarkMode={isDarkMode}
                 toggleDarkMode={toggleDarkMode}
+                onToggleSidebar={() => setIsSidebarOpen(prev => !prev)}
             />
             <Settings 
                 isOpen={showSettings} 
@@ -170,7 +179,7 @@ const App: React.FC = () => {
             />
 
             <div className="flex-grow flex">
-                <aside className="w-64 h-[calc(100vh-4rem)] sticky top-16 bg-white dark:bg-slate-800/50 border-r border-slate-200 dark:border-slate-800 flex-col no-print hidden md:flex">
+                <aside className={`w-64 h-[calc(100vh-4rem)] sticky top-16 bg-white dark:bg-slate-800/50 border-r border-slate-200 dark:border-slate-800 flex-col no-print transition-all duration-300 ease-in-out md:flex ${isSidebarOpen ? 'md:translate-x-0' : 'md:-translate-x-full'} absolute md:static z-30`}>
                     <div className="p-4 border-b border-slate-200 dark:border-slate-700">
                         <h2 className="font-semibold text-slate-800 dark:text-slate-200">History</h2>
                     </div>
@@ -181,15 +190,27 @@ const App: React.FC = () => {
                 
                 <main className="flex-grow p-4 sm:p-6 lg:p-8 relative">
                     <ErrorBoundary>
-                        {isLoading && <Loader message="Analyzing your bill..." />}
+                        {isLoading && <Loader logs={logs} />}
                         
                         {error && !isLoading && (
                             <div className="max-w-4xl mx-auto">
                                 <ErrorMessage message={error} onRetry={capturedImage ? handleAnalyzeBill : resetState} />
                             </div>
                         )}
+                        
+                        {!billData && !capturedImage && !isLoading && (
+                           <>
+                                <Welcome />
+                                <div className="max-w-4xl mx-auto mt-8">
+                                     <div className="flex flex-col sm:flex-row items-stretch justify-center gap-6">
+                                        <FileUpload onFileUpload={handleFileUpload} disabled={isLoading} />
+                                        <div className="text-sm text-slate-400 dark:text-slate-500 flex items-center justify-center">OR</div>
+                                        <CameraCapture onCapture={handleCameraCapture} disabled={isLoading} />
+                                    </div>
+                                </div>
+                           </>
+                        )}
 
-                        {!billData && !capturedImage && !isLoading && <Welcome />}
 
                         {billData && !isLoading && <BillDataDisplay billData={billData} onUpdate={handleBillDataUpdate} onAnalyzeNew={resetState} />}
 
@@ -202,7 +223,10 @@ const App: React.FC = () => {
                                     <button onClick={resetState} className="px-6 py-2 text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-700 border border-slate-300 dark:border-slate-600 rounded-md font-semibold hover:bg-slate-50 dark:hover:bg-slate-600">
                                         Cancel
                                     </button>
-                                    <button onClick={handleAnalyzeBill} className="px-6 py-2 text-white bg-sky-600 rounded-md font-semibold hover:bg-sky-700">
+                                    <button onClick={handleAnalyzeBill} className="px-6 py-2 text-white bg-sky-600 rounded-md font-semibold hover:bg-sky-700 flex items-center justify-center">
+                                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 mr-2">
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="m15.75 15.75-2.489-2.489m0 0a3.375 3.375 0 1 0-4.773-4.773 3.375 3.375 0 0 0 4.773 4.773ZM4.5 19.5l3-3m0 0l2.25-2.25M7.5 16.5l2.25-2.25m0 0l3 3M7.5 16.5l-3 3m0 0l-3-3m3 3V4.5m0 12V6.75" />
+                                        </svg>
                                         Analyze Bill
                                     </button>
                                 </div>
@@ -211,16 +235,6 @@ const App: React.FC = () => {
                     </ErrorBoundary>
                 </main>
             </div>
-            
-            {!billData && !capturedImage && (
-                <footer className="sticky bottom-0 bg-white/80 dark:bg-slate-900/80 backdrop-blur-lg border-t border-slate-200 dark:border-slate-700 p-4 no-print z-20">
-                    <div className="max-w-4xl mx-auto flex flex-col sm:flex-row items-center justify-center gap-4">
-                        <FileUpload onFileUpload={handleFileUpload} disabled={isLoading} />
-                        <div className="text-sm text-slate-400">OR</div>
-                        <CameraCapture onCapture={handleCameraCapture} disabled={isLoading} />
-                    </div>
-                </footer>
-            )}
             
             <DebugLog logs={logs} isVisible={showDebugLog} />
         </div>

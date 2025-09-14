@@ -60,7 +60,7 @@ export interface OllamaModel {
 
 export type LogEntry = {
   timestamp: string;
-  level: 'INFO' | 'ERROR' | 'DEBUG';
+  level: 'INFO' | 'ERROR' | 'DEBUG' | 'PROGRESS';
   message: string;
   payload?: any;
 };

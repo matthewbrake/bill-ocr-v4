@@ -1,4 +1,3 @@
-
 import React from 'react';
 
 interface ErrorMessageProps {
@@ -8,22 +7,25 @@ interface ErrorMessageProps {
 
 export const ErrorMessage: React.FC<ErrorMessageProps> = ({ message, onRetry }) => {
     return (
-        <div className="bg-red-50 dark:bg-red-900/20 border-l-4 border-red-400 p-4 rounded-r-lg my-4">
+        <div className="bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-500/30 p-6 rounded-lg my-4 shadow-md">
             <div className="flex">
                 <div className="flex-shrink-0">
-                    <svg className="h-5 w-5 text-red-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                    <svg className="h-6 w-6 text-red-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor" >
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" />
                     </svg>
                 </div>
-                <div className="ml-3">
-                    <p className="text-sm text-red-700 dark:text-red-300">
+                <div className="ml-4">
+                    <h3 className="text-lg font-semibold text-red-800 dark:text-red-200">Analysis Error</h3>
+                    <p className="mt-1 text-red-700 dark:text-red-300">
                         {message}
-                        {onRetry && (
-                             <button onClick={onRetry} className="ml-2 font-medium underline hover:text-red-600 dark:hover:text-red-200">
+                    </p>
+                    {onRetry && (
+                        <div className="mt-4">
+                             <button onClick={onRetry} className="px-4 py-2 text-sm font-medium text-white bg-red-600 border border-transparent rounded-md shadow-sm hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-red-50 dark:focus:ring-offset-slate-900 focus:ring-red-500">
                                 Try again
                             </button>
-                        )}
-                    </p>
+                        </div>
+                    )}
                 </div>
             </div>
         </div>
