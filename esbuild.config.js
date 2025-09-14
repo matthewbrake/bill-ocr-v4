@@ -10,6 +10,16 @@ esbuild.build({
   outfile: 'dist/index.js',
   sourcemap: !isProduction,
   minify: isProduction,
+  // Mark packages that are loaded via the importmap in index.html as external.
+  // This prevents esbuild from bundling them, resolving potential conflicts
+  // and reducing the final bundle size.
+  external: [
+    'react',
+    'react-dom/*',
+    '@google/genai',
+    'recharts',
+    'tesseract.js'
+  ],
   define: {
     'process.env.API_KEY': JSON.stringify(process.env.API_KEY || ''),
     'process.env.FORMSPREE_FORM_ID': JSON.stringify(process.env.FORMSPREE_FORM_ID || ''),
